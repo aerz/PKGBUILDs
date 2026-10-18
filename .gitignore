@@ -1,0 +1,9 @@
+# makepkg artifacts
+*.pkg.tar.*
+*.src.tar.*
+pkg/
+src/
+
+# nvchecker local logs
+oldver.json
+newver.json

@@ -1,0 +1,89 @@
+name: update-aur
+
+on:
+  schedule:
+    # Every day at 04:17 UTC. Adjust to taste.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only detect new versions (no changes, no publishing)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: aur-update
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    name: nvchecker
+    runs-on: ubuntu-latest
+    container:
+      # makepkg and updpkgsums need Arch Linux.
+      image: archlinux:base-devel
+    outputs:
+      changed: ${{ steps.commit.outputs.changed }}
+      base: ${{ steps.detect.outputs.base }}
+      head: ${{ steps.commit.outputs.head }}
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed git jq nvchecker python pacman-contrib
+
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up build user
+        # makepkg refuses to run as root.
+        run: |
+          useradd --create-home builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+
+      - name: Detect and update
+        id: detect
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          echo "base=$(runuser -u builder -- git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          extra=()
+          if [[ "${DRY_RUN:-false}" == "true" ]]; then extra+=(--dry-run); fi
+          runuser -u builder -- python3 "$GITHUB_WORKSPACE/.github/scripts/update-packages.py" \
+            --summary /tmp/aur-summary.json "${extra[@]}"
+
+      - name: Commit and push
+        id: commit
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          set -euo pipefail
+          changed=$(jq -r '.changed | length' /tmp/aur-summary.json)
+          if [[ "$changed" -eq 0 ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          message=$(jq -r '.message' /tmp/aur-summary.json)
+          git_() { runuser -u builder -- git -C "$GITHUB_WORKSPACE" "$@"; }
+          git_ config user.name "github-actions[bot]"
+          git_ config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git_ add -A
+          if git_ diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git_ commit -m "$message"
+          git_ push
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "head=$(git_ rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish to AUR
+    needs: update
+    if: ${{ inputs.dry_run != true && needs.update.outputs.changed == 'true' }}
+    uses: ./.github/workflows/publish.yml
+    with:
+      base: ${{ needs.update.outputs.base }}
+      head: ${{ needs.update.outputs.head }}
+    secrets: inherit

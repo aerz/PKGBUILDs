@@ -1,0 +1,7 @@
+# The version travels in the Location header of the download endpoint:
+#   https://ticktick.com/down/getApp/download?type=linux_deb_x64
+#   → .../linux_deb_x64/ticktick-<version>-amd64.deb
+[ticktick]
+source = "httpheader"
+url = "https://ticktick.com/down/getApp/download?type=linux_deb_x64"
+regex = "ticktick-([0-9.]+)-amd64[.]deb"
