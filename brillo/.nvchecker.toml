@@ -1,0 +1,7 @@
+# Upstream publishes tags only (vX.Y.Z), no GitLab releases; use_max_tag
+# picks the highest and prefix strips the leading "v".
+[brillo]
+source = "gitlab"
+gitlab = "cameronnemo/brillo"
+use_max_tag = true
+prefix = "v"
