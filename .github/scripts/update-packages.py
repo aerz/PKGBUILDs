@@ -11,6 +11,8 @@ For each package (a top-level directory with a PKGBUILD and .nvchecker.toml):
      <package>/.ci/update.sh instead, with NEWVER and OLDPKGVER in the
      environment; that script does the whole bump itself.
 
+Packages listed in .github/excluded-packages are ignored.
+
 Errors in one package don't abort the rest: they are reported as warnings and
 in the run summary. The script does not commit; the workflow does. It exits
 non-zero only when every checked package fails.
@@ -43,6 +45,7 @@ SUMS_RE = re.compile(
     r"^(?:ck|md5|sha1|sha224|sha256|sha384|sha512|b2)sums(?:_[A-Za-z0-9_]+)?=", re.M
 )
 PKGVER_FN_RE = re.compile(r"^pkgver\(\)", re.M)
+EXCLUDED_FILE = ROOT / ".github" / "excluded-packages"
 
 
 def run(
@@ -51,6 +54,20 @@ def run(
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(cmd, cwd=cwd, env=env, check=True, capture_output=True, text=True)
+
+
+def excluded_packages() -> set[str]:
+    """Names from .github/excluded-packages, one per line (# comments allowed)."""
+    try:
+        text = EXCLUDED_FILE.read_text()
+    except FileNotFoundError:
+        return set()
+    names: set[str] = set()
+    for line in text.splitlines():
+        name = line.split("#", 1)[0].strip()
+        if name:
+            names.add(name)
+    return names
 
 
 def pkg_vars(pkgdir: Path) -> dict[str, str]:
@@ -147,9 +164,12 @@ def main() -> int:
 
     results: list[dict] = []
     changed: list[dict] = []
+    excluded = excluded_packages()
 
     for pkgbuild in sorted(ROOT.glob("*/PKGBUILD")):
         pkgdir = pkgbuild.parent
+        if pkgdir.name in excluded:
+            continue
         entry: dict = {"dir": pkgdir.name}
         try:
             if not (pkgdir / ".nvchecker.toml").exists():
