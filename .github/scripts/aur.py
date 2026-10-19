@@ -218,7 +218,7 @@ def publish(staging: Path) -> None:
                 diff.check_returncode()
             run(["git", "-c", f"user.name={identity['AUR_USERNAME']}",
                  "-c", f"user.email={identity['AUR_EMAIL']}", "commit", "-m",
-                 commit_message(pkgdir.name, values)], repo)
+                 f"Update to v{values['pkgver']}"], repo)
             run(["git", "push", "origin", "HEAD:master"], repo, env=env)
 
 
