@@ -1,8 +1,14 @@
-name: update-aur
+name: aur
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "*/*"
+      - "!*/.*"
+      - "*/.SRCINFO"
+      - "!.github/**"
   schedule:
-    # Every day at 04:17 UTC. Adjust to taste.
     - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
@@ -11,79 +17,104 @@ on:
         type: boolean
         default: false
 
+# Serialize updates and publishing together, including manual pushes.
 concurrency:
-  group: aur-update
+  group: aur-${{ inputs.dry_run == true && 'dry-run' || 'sync' }}
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  contents: read
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   update:
-    name: nvchecker
+    if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'push' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
     container:
-      # makepkg and updpkgsums need Arch Linux.
-      image: archlinux:base-devel
-    outputs:
-      changed: ${{ steps.commit.outputs.changed }}
-      base: ${{ steps.detect.outputs.base }}
-      head: ${{ steps.commit.outputs.head }}
+      image: archlinux:base@sha256:3c64b538588416593f69a1aebd2f2ec0f2541b29159f32556fa7def2167147a0
     steps:
       - name: Install dependencies
-        run: pacman -Syu --noconfirm --needed git jq nvchecker python pacman-contrib
+        run: pacman -Syu --noconfirm --needed git python nvchecker pacman-contrib
 
-      - name: Checkout
+      - name: Checkout current main
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: main
+          persist-credentials: false
 
       - name: Set up build user
-        # makepkg refuses to run as root.
         run: |
           useradd --create-home builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
 
       - name: Detect and update
-        id: detect
         env:
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          set -euo pipefail
-          echo "base=$(runuser -u builder -- git -C "$GITHUB_WORKSPACE" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           extra=()
-          if [[ "${DRY_RUN:-false}" == "true" ]]; then extra+=(--dry-run); fi
-          runuser -u builder -- python3 "$GITHUB_WORKSPACE/.github/scripts/update-packages.py" \
-            --summary /tmp/aur-summary.json "${extra[@]}"
+          if [[ "$DRY_RUN" == "true" ]]; then extra+=(--dry-run); fi
+          runuser -u builder -- python .github/scripts/aur.py update "${extra[@]}"
 
       - name: Commit and push
-        id: commit
         if: ${{ inputs.dry_run != true }}
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          changed=$(jq -r '.changed | length' /tmp/aur-summary.json)
-          if [[ "$changed" -eq 0 ]]; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          message=$(jq -r '.message' /tmp/aur-summary.json)
-          git_() { runuser -u builder -- git -C "$GITHUB_WORKSPACE" "$@"; }
-          git_ config user.name "github-actions[bot]"
-          git_ config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git_ add -A
-          if git_ diff --cached --quiet; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          git_ commit -m "$message"
-          git_ push
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-          echo "head=$(git_ rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          git_() { runuser -u builder -- git "$@"; }
+          git_ add -- '*/PKGBUILD' '*/.SRCINFO'
+          if git_ diff --cached --quiet; then exit 0; fi
+          message=$(runuser -u builder -- python .github/scripts/aur.py commit-message)
+          git_ -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "$message"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
+          unset GH_TOKEN
+          git_ push origin HEAD:main
 
+  # Every run, including the schedule, reconciles all AUR packages and
+  # overwrites changes made directly in AUR.
   publish:
-    name: Publish to AUR
+    environment: aur
     needs: update
-    if: ${{ inputs.dry_run != true && needs.update.outputs.changed == 'true' }}
-    uses: ./.github/workflows/publish.yml
-    with:
-      base: ${{ needs.update.outputs.base }}
-      head: ${{ needs.update.outputs.head }}
-    secrets: inherit
+    if: >-
+      ${{ !cancelled() && github.ref == 'refs/heads/main' && inputs.dry_run != true &&
+          (needs.update.result == 'success' || needs.update.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: archlinux:base@sha256:3c64b538588416593f69a1aebd2f2ec0f2541b29159f32556fa7def2167147a0
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed git openssh python
+
+      - name: Checkout current main
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: main
+          persist-credentials: false
+
+      # prepare executes package PKGBUILDs in this job before AUR secrets are
+      # injected. Merged package code is trusted; this is not a sandbox.
+      - name: Prepare packages without credentials
+        run: |
+          useradd --create-home builder
+          mkdir -p "$RUNNER_TEMP/aur-packages"
+          chown -R builder:builder "$GITHUB_WORKSPACE" "$RUNNER_TEMP/aur-packages"
+          runuser -u builder -- python .github/scripts/aur.py prepare "$RUNNER_TEMP/aur-packages"
+
+      - name: Publish prepared files
+        env:
+          AUR_USERNAME: ${{ secrets.AUR_USERNAME }}
+          AUR_EMAIL: ${{ secrets.AUR_EMAIL }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: runuser -u builder -- python .github/scripts/aur.py publish "$RUNNER_TEMP/aur-packages"
