@@ -1,7 +1,8 @@
-# Upstream publishes tags only (vX.Y.Z), no GitLab releases; use_max_tag
-# picks the highest and prefix strips the leading "v".
+# Upstream publishes tags only, without GitLab releases.
+# Ignore pre-release tags when choosing an update.
 [brillo]
 source = "gitlab"
 gitlab = "cameronnemo/brillo"
 use_max_tag = true
 prefix = "v"
+include_regex = 'v[0-9]+(?:[.][0-9]+)*'
