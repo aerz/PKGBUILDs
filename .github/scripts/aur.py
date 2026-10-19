@@ -82,10 +82,7 @@ def metadata(srcinfo: str, name: str) -> dict[str, str]:
 
 
 def commit_message(name: str, values: dict[str, str]) -> str:
-    version = f"{values['pkgver']}-{values['pkgrel']}"
-    if "epoch" in values:
-        version = f"{values['epoch']}:{version}"
-    return f"upgpkg: {name} {version}"
+    return f"upgpkg {name} {values['pkgver']}"
 
 
 def update_commit_message() -> None:
