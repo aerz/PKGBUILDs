@@ -34,6 +34,8 @@ jobs:
     if: ${{ github.ref == 'refs/heads/main' && github.event_name != 'push' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    outputs:
+      changed: ${{ steps.commit.outputs.changed }}
     permissions:
       contents: write
     container:
@@ -62,13 +64,17 @@ jobs:
           runuser -u builder -- python .github/scripts/aur.py update "${extra[@]}"
 
       - name: Commit and push
+        id: commit
         if: ${{ inputs.dry_run != true }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           git_() { runuser -u builder -- git "$@"; }
           git_ add -- '*/PKGBUILD' '*/.SRCINFO'
-          if git_ diff --cached --quiet; then exit 0; fi
+          if git_ diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           message=$(runuser -u builder -- python .github/scripts/aur.py commit-message)
           git_ -c user.name='github-actions[bot]' \
             -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
@@ -80,15 +86,17 @@ jobs:
           export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
           unset GH_TOKEN
           git_ push origin HEAD:main
+          echo "changed=true" >> "$GITHUB_OUTPUT"
 
-  # Every run, including the schedule, reconciles all AUR packages and
-  # overwrites changes made directly in AUR.
+  # Scheduled runs publish only when package updates were pushed.
+  # Publishing reconciles all AUR packages, overwriting direct AUR changes.
   publish:
     environment: aur
     needs: update
     if: >-
       ${{ !cancelled() && github.ref == 'refs/heads/main' && inputs.dry_run != true &&
-          (needs.update.result == 'success' || needs.update.result == 'skipped') }}
+          (needs.update.result == 'success' || needs.update.result == 'skipped') &&
+          (github.event_name != 'schedule' || needs.update.outputs.changed == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     container:
